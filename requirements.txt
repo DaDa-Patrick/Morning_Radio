@@ -1,0 +1,12 @@
+openai
+librosa
+soundfile
+pydub
+requests
+python-dotenv
+azure-cognitiveservices-speech
+ffmpeg-python
+pyrubberband
+google-api-python-client
+google-auth-oauthlib
+edge-tts
