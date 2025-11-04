@@ -12,7 +12,14 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from ..audio.hook_finder import find_hook
-from ..audio.mixer import SongSegmentPlan, crossfade_tracks, duck_voice_over, extract_segment, export_with_metadata
+from ..audio.mixer import (
+    SongSegmentPlan,
+    append_full_song,
+    crossfade_tracks,
+    duck_voice_over,
+    extract_segment,
+    export_with_metadata,
+)
 from ..data.email_parser import load_email_summary
 from ..data.songs_loader import SongMetadata, load_songs
 from ..data.weather import WeatherForecast, WeatherRequest, fetch_weather
@@ -102,12 +109,25 @@ class MorningCastPipeline:
         voice_path = self.config.output_dir / f"podcast_{slug}_voice.wav"
         self._render_tts(plain_text, ssml, voice_path)
 
-        music_mix_path = self._build_music_mix(plan_json, songs, slug)
-        mixed_path = self.config.output_dir / f"podcast_{slug}_mix.wav"
-        duck_voice_over(music_mix_path, voice_path, mixed_path)
+        music_mix_path, final_song_path = self._build_music_mix(plan_json, songs, slug)
+        ducked_path: Path
+        if music_mix_path:
+            ducked_path = self.config.output_dir / f"podcast_{slug}_mix.wav"
+            duck_voice_over(music_mix_path, voice_path, ducked_path)
+            logger.info("Voice and background bed mixed to %s", ducked_path)
+        else:
+            ducked_path = voice_path
+
+        show_audio_path = ducked_path
+        if final_song_path:
+            appended_path = self.config.output_dir / f"podcast_{slug}_with_song.wav"
+            append_full_song(ducked_path, final_song_path, appended_path)
+            show_audio_path = appended_path
+            logger.info("Final song appended from %s", final_song_path)
+
         final_audio = self.config.output_dir / f"podcast_{slug}.mp3"
         export_with_metadata(
-            mixed_path,
+            show_audio_path,
             final_audio,
             metadata={
                 "title": f"MorningCast {self.config.date.isoformat()}",
@@ -308,12 +328,12 @@ class MorningCastPipeline:
 
         return "<speak>" + "".join(ssml_parts) + "</speak>"
 
-    def _build_music_mix(self, plan: Dict[str, Any], songs: List[SongMetadata], slug: str) -> Path:
+    def _build_music_mix(
+        self, plan: Dict[str, Any], songs: List[SongMetadata], slug: str
+    ) -> tuple[Optional[Path], Optional[Path]]:
         segments = plan.get("segments", [])
-        extracted_paths: List[Path] = []
-        temp_dir = self.config.output_dir / "tmp"
-        temp_dir.mkdir(exist_ok=True)
-        for idx, segment in enumerate(segments):
+        song_sequence: List[SongMetadata] = []
+        for segment in segments:
             song_title = segment.get("song")
             if not song_title:
                 continue
@@ -321,6 +341,22 @@ class MorningCastPipeline:
             if not song:
                 logger.warning("Song %s not found in metadata", song_title)
                 continue
+            song_sequence.append(song)
+
+        if not song_sequence:
+            return None, None
+
+        final_song = song_sequence[-1]
+        final_song_path = final_song.path if final_song.path.exists() else None
+        if final_song_path is None:
+            logger.warning("Final song %s is missing on disk", final_song.title)
+
+        bed_candidates = song_sequence[:-1]
+
+        extracted_paths: List[Path] = []
+        temp_dir = self.config.output_dir / "tmp"
+        temp_dir.mkdir(exist_ok=True)
+        for idx, song in enumerate(bed_candidates):
             hook = find_hook(song.path)
             output = temp_dir / f"segment_{idx}_{slug}.wav"
             extract_segment(
@@ -328,12 +364,15 @@ class MorningCastPipeline:
                 output,
             )
             extracted_paths.append(output)
+
         if not extracted_paths:
-            raise RuntimeError("No songs available for mix")
+            logger.info("No background music beds generated; voice will run dry.")
+            return None, final_song_path
+
         mix_path = temp_dir / f"music_mix_{slug}.wav"
         crossfade_tracks(extracted_paths, mix_path)
         logger.info("Music mix rendered to %s", mix_path)
-        return mix_path
+        return mix_path, final_song_path
 
     def _find_song(self, title: str, songs: List[SongMetadata]) -> Optional[SongMetadata]:
         lowered = title.lower()

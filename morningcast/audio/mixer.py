@@ -44,20 +44,79 @@ def crossfade_tracks(tracks: Iterable[Path], output_path: Path, crossfade: float
     return output_path
 
 
-def duck_voice_over(music_path: Path, voice_path: Path, output_path: Path) -> Path:
-    """Apply sidechain compression so the voice track leads."""
+def duck_voice_over(
+    music_path: Path,
+    voice_path: Path,
+    output_path: Path,
+    *,
+    music_gain_db: float = -18.0,
+    voice_gain_db: float = 0.0,
+    target_lufs: float = -16.0,
+) -> Path:
+    """Blend the host voice with a subdued music bed using sidechain ducking."""
+
     music = ffmpeg.input(str(music_path))
     voice = ffmpeg.input(str(voice_path))
-    compressed = ffmpeg.filter(
-        [music.audio, voice.audio],
+
+    music_audio = music.audio.filter_("volume", volume=f"{music_gain_db}dB")
+    voice_audio = voice.audio.filter_("volume", volume=f"{voice_gain_db}dB")
+
+    ducked_music = ffmpeg.filter(
+        [music_audio, voice_audio],
         "sidechaincompress",
-        threshold="-18dB",
-        ratio=6,
-        attack=12,
-        release=200,
+        threshold="-28dB",
+        ratio=12,
+        attack=8,
+        release=350,
+        makeup=6,
     )
-    mix = ffmpeg.filter([compressed, voice.audio], "amix", inputs=2, dropout_transition=0)
-    ffmpeg.output(mix, str(output_path), ac=2).overwrite_output().run(quiet=True)
+
+    mixed = ffmpeg.filter([ducked_music, voice_audio], "amix", inputs=2, dropout_transition=0)
+    mixed = mixed.filter_(
+        "alimiter",
+        limit="-1dB",
+        level="disabled",
+    )
+    mixed = mixed.filter_(
+        "loudnorm",
+        I=str(target_lufs),
+        TP="-1.5",
+        LRA="11",
+    )
+
+    ffmpeg.output(mixed, str(output_path), ac=2, ar=44100).overwrite_output().run(quiet=True)
+    return output_path
+
+
+def append_full_song(
+    prefix_path: Path,
+    song_path: Path,
+    output_path: Path,
+    *,
+    gap_seconds: float = 1.5,
+    song_fade_in: float = 2.5,
+) -> Path:
+    """Append the requested full song after the spoken programme."""
+
+    prefix = ffmpeg.input(str(prefix_path))
+    song = ffmpeg.input(str(song_path))
+
+    song_audio = song.audio
+    if song_fade_in > 0:
+        song_audio = song_audio.filter("afade", t="in", d=song_fade_in)
+
+    streams = [prefix.audio]
+    if gap_seconds > 0:
+        silence = ffmpeg.input(
+            "anullsrc=r=44100:cl=stereo",
+            f="lavfi",
+            t=gap_seconds,
+        )
+        streams.append(silence.audio)
+    streams.append(song_audio)
+
+    concatenated = ffmpeg.concat(*streams, v=0, a=1)
+    ffmpeg.output(concatenated, str(output_path), ac=2, ar=44100).overwrite_output().run(quiet=True)
     return output_path
 
 
