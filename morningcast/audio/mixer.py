@@ -63,7 +63,15 @@ def duck_voice_over(music_path: Path, voice_path: Path, output_path: Path) -> Pa
 
 def export_with_metadata(source: Path, target: Path, metadata: Optional[dict] = None, cover: Optional[Path] = None) -> Path:
     stream = ffmpeg.input(str(source))
-    codec = "mp3" if target.suffix.lower() == ".mp3" else "aac"
+    suffix = target.suffix.lower()
+    if suffix == ".mp3":
+        codec = "libmp3lame"
+    elif suffix in {".aac", ".m4a"}:
+        codec = "aac"
+    elif suffix == ".wav":
+        codec = "pcm_s16le"
+    else:
+        codec = "copy"
     metadata_args = {f"metadata:g:{key}": value for key, value in (metadata or {}).items()}
     if cover and cover.exists():
         cover_stream = ffmpeg.input(str(cover))
