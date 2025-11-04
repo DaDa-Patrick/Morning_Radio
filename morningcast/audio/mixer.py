@@ -63,12 +63,38 @@ def duck_voice_over(music_path: Path, voice_path: Path, output_path: Path) -> Pa
 
 def export_with_metadata(source: Path, target: Path, metadata: Optional[dict] = None, cover: Optional[Path] = None) -> Path:
     stream = ffmpeg.input(str(source))
-    codec = "mp3" if target.suffix.lower() == ".mp3" else "aac"
-    metadata_args = {f"metadata:g:{key}": value for key, value in (metadata or {}).items()}
+    suffix = target.suffix.lower()
+    if suffix == ".mp3":
+        codec = "libmp3lame"
+    elif suffix in {".aac", ".m4a"}:
+        codec = "aac"
+    elif suffix == ".wav":
+        codec = "pcm_s16le"
+    else:
+        codec = "copy"
+
+    output_streams = [stream]
+    output_kwargs = {"acodec": codec}
+
     if cover and cover.exists():
         cover_stream = ffmpeg.input(str(cover))
-        output = ffmpeg.output(stream, cover_stream, str(target), acodec=codec, **metadata_args)
+        output_streams.append(cover_stream)
+        output = ffmpeg.output(*output_streams, str(target), **output_kwargs)
+        output = output.global_args("-map", "0:a", "-map", "1:v", "-id3v2_version", "3")
+        output = output.global_args(
+            "-metadata:s:v:0",
+            "title=Album cover",
+            "-metadata:s:v:0",
+            "comment=Cover (Front)",
+            "-disposition:v:0",
+            "attached_pic",
+        )
     else:
-        output = ffmpeg.output(stream, str(target), acodec=codec, **metadata_args)
+        output = ffmpeg.output(*output_streams, str(target), **output_kwargs)
+
+    if metadata:
+        for key, value in metadata.items():
+            output = output.global_args("-metadata", f"{key}={value}")
+
     ffmpeg.run(output, overwrite_output=True, quiet=True)
     return target
