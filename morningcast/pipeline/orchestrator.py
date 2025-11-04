@@ -91,11 +91,16 @@ class MorningCastPipeline:
         transcript_path.write_text(script, encoding="utf-8")
         logger.info("Transcript saved to %s", transcript_path)
 
+        plain_text, ssml = self._prepare_script_variants(script)
+        plaintext_path = self.config.output_dir / f"podcast_{slug}.txt"
+        plaintext_path.write_text(plain_text, encoding="utf-8")
+        logger.info("Plain text transcript saved to %s", plaintext_path)
+
         timeline_path = self.config.output_dir / f"podcast_{slug}.json"
         timeline_path.write_text(json.dumps(plan_json, ensure_ascii=False, indent=2), encoding="utf-8")
 
         voice_path = self.config.output_dir / f"podcast_{slug}_voice.wav"
-        self._render_tts(script, voice_path)
+        self._render_tts(plain_text, ssml, voice_path)
 
         music_mix_path = self._build_music_mix(plan_json, songs, slug)
         mixed_path = self.config.output_dir / f"podcast_{slug}_mix.wav"
@@ -114,6 +119,7 @@ class MorningCastPipeline:
         logger.info("MorningCast pipeline completed")
         return {
             "transcript_path": transcript_path,
+            "plaintext_path": plaintext_path,
             "timeline_path": timeline_path,
             "audio_path": final_audio,
             "plan": plan_json,
@@ -202,10 +208,105 @@ class MorningCastPipeline:
         logger.info("Falling back to Edge TTS")
         return EdgeTTSEngine()
 
-    def _render_tts(self, ssml: str, output_path: Path) -> None:
+    def _render_tts(self, plain_text: str, ssml: str, output_path: Path) -> None:
         engine = self._select_tts_engine()
-        engine.synthesize_ssml(ssml, output_path)
+        engine.synthesize(plain_text=plain_text, ssml=ssml, output_path=output_path)
         logger.info("Voice track rendered to %s", output_path)
+
+    def _prepare_script_variants(self, script: str) -> tuple[str, str]:
+        """Return a plain text version of the script and an SSML rendition."""
+        script = script.strip()
+        if not script:
+            raise ValueError("Empty script provided for TTS")
+
+        ssml_candidate = self._extract_ssml_block(script)
+        if ssml_candidate:
+            plain = self._ssml_to_plain_text(ssml_candidate)
+            if not plain:
+                raise ValueError("SSML block did not contain readable content")
+            return plain, ssml_candidate
+
+        plain = self._markdown_to_plain_text(script)
+        if not plain:
+            raise ValueError("Script did not contain any readable content")
+        ssml = self._plain_text_to_ssml(plain)
+        return plain, ssml
+
+    @staticmethod
+    def _extract_ssml_block(script: str) -> Optional[str]:
+        """Extract an SSML block if present, removing code fences when necessary."""
+        fence_match = re.search(r"```\s*(?:xml)?\s*(<speak[\s\S]+?)```", script, flags=re.IGNORECASE)
+        if fence_match:
+            return fence_match.group(1).strip()
+
+        speak_match = re.search(r"(<speak[\s\S]+?</speak>)", script, flags=re.IGNORECASE)
+        if speak_match:
+            return speak_match.group(1).strip()
+        return None
+
+    @staticmethod
+    def _ssml_to_plain_text(ssml: str) -> str:
+        import html
+
+        text = re.sub(r"<\/?speak[^>]*>", " ", ssml, flags=re.IGNORECASE)
+        text = re.sub(r"</p>", "\n\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"\s+\n", "\n", text)
+        text = re.sub(r"\n\s+", "\n", text)
+        return html.unescape(text.strip())
+
+    @staticmethod
+    def _markdown_to_plain_text(script: str) -> str:
+        import html
+
+        text = script
+        text = re.sub(r"```[\s\S]*?```", "\n", text)
+        text = re.sub(r"`([^`]+)`", r"\1", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"[*_]{1,3}([^*_]+)[*_]{1,3}", r"\1", text)
+        text = re.sub(r"^\s{0,3}#+\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s{0,3}(?:[-*+]\s+|\d+\.\s+)", "", text, flags=re.MULTILINE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        lines = [line.strip() for line in text.splitlines()]
+
+        paragraphs: List[str] = []
+        current: List[str] = []
+        for line in lines:
+            if not line:
+                if current:
+                    paragraphs.append(" ".join(current))
+                    current = []
+                continue
+            current.append(line)
+        if current:
+            paragraphs.append(" ".join(current))
+
+        cleaned = "\n\n".join(paragraphs).strip()
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)
+        return html.unescape(cleaned)
+
+    @staticmethod
+    def _plain_text_to_ssml(plain_text: str) -> str:
+        import html
+
+        paragraphs = [para.strip() for para in re.split(r"\n\s*\n", plain_text) if para.strip()]
+        if not paragraphs:
+            raise ValueError("Plain text conversion produced no paragraphs")
+
+        sentence_splitter = re.compile(r"(?<=[.!?])\s+")
+        ssml_parts: List[str] = []
+        for para in paragraphs:
+            sentences = [html.escape(sentence.strip()) for sentence in sentence_splitter.split(para) if sentence.strip()]
+            if not sentences:
+                continue
+            ssml_parts.append("<p>" + "".join(f"<s>{sentence}</s>" for sentence in sentences) + "</p>")
+
+        if not ssml_parts:
+            raise ValueError("Plain text sanitisation removed all readable content")
+
+        return "<speak>" + "".join(ssml_parts) + "</speak>"
 
     def _build_music_mix(self, plan: Dict[str, Any], songs: List[SongMetadata], slug: str) -> Path:
         segments = plan.get("segments", [])
