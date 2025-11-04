@@ -202,10 +202,76 @@ class MorningCastPipeline:
         logger.info("Falling back to Edge TTS")
         return EdgeTTSEngine()
 
-    def _render_tts(self, ssml: str, output_path: Path) -> None:
+    def _render_tts(self, script: str, output_path: Path) -> None:
+        ssml = self._normalise_script_to_ssml(script)
         engine = self._select_tts_engine()
         engine.synthesize_ssml(ssml, output_path)
         logger.info("Voice track rendered to %s", output_path)
+
+    def _normalise_script_to_ssml(self, script: str) -> str:
+        """Convert markdown/SSML hybrids into valid SSML for the TTS engines."""
+        script = script.strip()
+        if not script:
+            raise ValueError("Empty script provided for TTS")
+
+        ssml_candidate = self._extract_ssml_block(script)
+        if ssml_candidate:
+            return ssml_candidate
+        return self._markdown_to_ssml(script)
+
+    @staticmethod
+    def _extract_ssml_block(script: str) -> Optional[str]:
+        """Extract an SSML block if present, removing code fences when necessary."""
+        fence_match = re.search(r"```\s*(?:xml)?\s*(<speak[\s\S]+?)```", script, flags=re.IGNORECASE)
+        if fence_match:
+            return fence_match.group(1).strip()
+
+        speak_match = re.search(r"(<speak[\s\S]+?</speak>)", script, flags=re.IGNORECASE)
+        if speak_match:
+            return speak_match.group(1).strip()
+        return None
+
+    @staticmethod
+    def _markdown_to_ssml(script: str) -> str:
+        import html
+
+        text = script
+        text = re.sub(r"```[\s\S]*?```", "\n", text)
+        text = re.sub(r"`([^`]+)`", r"\1", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"[*_]{1,3}([^*_]+)[*_]{1,3}", r"\1", text)
+        text = re.sub(r"^\s{0,3}#+\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s{0,3}(?:[-*+]\s+|\d+\.\s+)", "", text, flags=re.MULTILINE)
+        text = re.sub(r"<[^>]+>", "", text)
+        paragraphs = [para.strip() for para in text.splitlines()]
+
+        pieces: List[str] = []
+        current: List[str] = []
+        for para in paragraphs:
+            if not para:
+                if current:
+                    pieces.append(" ".join(current))
+                    current = []
+                continue
+            current.append(para)
+        if current:
+            pieces.append(" ".join(current))
+
+        if not pieces:
+            raise ValueError("Script did not contain any readable content")
+
+        ssml_parts: List[str] = []
+        sentence_splitter = re.compile(r"(?<=[.!?])\s+")
+        for piece in pieces:
+            sentences = [html.escape(sentence.strip()) for sentence in sentence_splitter.split(piece) if sentence.strip()]
+            if not sentences:
+                continue
+            ssml_parts.append("<p>" + "".join(f"<s>{sentence}</s>" for sentence in sentences) + "</p>")
+
+        if not ssml_parts:
+            raise ValueError("Script sanitisation removed all readable content")
+
+        return "<speak>" + "".join(ssml_parts) + "</speak>"
 
     def _build_music_mix(self, plan: Dict[str, Any], songs: List[SongMetadata], slug: str) -> Path:
         segments = plan.get("segments", [])
