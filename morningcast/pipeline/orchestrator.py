@@ -12,7 +12,14 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from ..audio.hook_finder import find_hook
-from ..audio.mixer import SongSegmentPlan, crossfade_tracks, duck_voice_over, extract_segment, export_with_metadata
+from ..audio.mixer import (
+    SongSegmentPlan,
+    append_full_song,
+    crossfade_tracks,
+    duck_voice_over,
+    extract_segment,
+    export_with_metadata,
+)
 from ..data.email_parser import load_email_summary
 from ..data.songs_loader import SongMetadata, load_songs
 from ..data.weather import WeatherForecast, WeatherRequest, fetch_weather
@@ -91,18 +98,36 @@ class MorningCastPipeline:
         transcript_path.write_text(script, encoding="utf-8")
         logger.info("Transcript saved to %s", transcript_path)
 
+        plain_text, ssml = self._prepare_script_variants(script)
+        plaintext_path = self.config.output_dir / f"podcast_{slug}.txt"
+        plaintext_path.write_text(plain_text, encoding="utf-8")
+        logger.info("Plain text transcript saved to %s", plaintext_path)
+
         timeline_path = self.config.output_dir / f"podcast_{slug}.json"
         timeline_path.write_text(json.dumps(plan_json, ensure_ascii=False, indent=2), encoding="utf-8")
 
         voice_path = self.config.output_dir / f"podcast_{slug}_voice.wav"
-        self._render_tts(script, voice_path)
+        self._render_tts(plain_text, ssml, voice_path)
 
-        music_mix_path = self._build_music_mix(plan_json, songs, slug)
-        mixed_path = self.config.output_dir / f"podcast_{slug}_mix.wav"
-        duck_voice_over(music_mix_path, voice_path, mixed_path)
+        music_mix_path, final_song_path = self._build_music_mix(plan_json, songs, slug)
+        ducked_path: Path
+        if music_mix_path:
+            ducked_path = self.config.output_dir / f"podcast_{slug}_mix.wav"
+            duck_voice_over(music_mix_path, voice_path, ducked_path)
+            logger.info("Voice and background bed mixed to %s", ducked_path)
+        else:
+            ducked_path = voice_path
+
+        show_audio_path = ducked_path
+        if final_song_path:
+            appended_path = self.config.output_dir / f"podcast_{slug}_with_song.wav"
+            append_full_song(ducked_path, final_song_path, appended_path)
+            show_audio_path = appended_path
+            logger.info("Final song appended from %s", final_song_path)
+
         final_audio = self.config.output_dir / f"podcast_{slug}.mp3"
         export_with_metadata(
-            mixed_path,
+            show_audio_path,
             final_audio,
             metadata={
                 "title": f"MorningCast {self.config.date.isoformat()}",
@@ -114,6 +139,7 @@ class MorningCastPipeline:
         logger.info("MorningCast pipeline completed")
         return {
             "transcript_path": transcript_path,
+            "plaintext_path": plaintext_path,
             "timeline_path": timeline_path,
             "audio_path": final_audio,
             "plan": plan_json,
@@ -202,17 +228,112 @@ class MorningCastPipeline:
         logger.info("Falling back to Edge TTS")
         return EdgeTTSEngine()
 
-    def _render_tts(self, ssml: str, output_path: Path) -> None:
+    def _render_tts(self, plain_text: str, ssml: str, output_path: Path) -> None:
         engine = self._select_tts_engine()
-        engine.synthesize_ssml(ssml, output_path)
+        engine.synthesize(plain_text=plain_text, ssml=ssml, output_path=output_path)
         logger.info("Voice track rendered to %s", output_path)
 
-    def _build_music_mix(self, plan: Dict[str, Any], songs: List[SongMetadata], slug: str) -> Path:
+    def _prepare_script_variants(self, script: str) -> tuple[str, str]:
+        """Return a plain text version of the script and an SSML rendition."""
+        script = script.strip()
+        if not script:
+            raise ValueError("Empty script provided for TTS")
+
+        ssml_candidate = self._extract_ssml_block(script)
+        if ssml_candidate:
+            plain = self._ssml_to_plain_text(ssml_candidate)
+            if not plain:
+                raise ValueError("SSML block did not contain readable content")
+            return plain, ssml_candidate
+
+        plain = self._markdown_to_plain_text(script)
+        if not plain:
+            raise ValueError("Script did not contain any readable content")
+        ssml = self._plain_text_to_ssml(plain)
+        return plain, ssml
+
+    @staticmethod
+    def _extract_ssml_block(script: str) -> Optional[str]:
+        """Extract an SSML block if present, removing code fences when necessary."""
+        fence_match = re.search(r"```\s*(?:xml)?\s*(<speak[\s\S]+?)```", script, flags=re.IGNORECASE)
+        if fence_match:
+            return fence_match.group(1).strip()
+
+        speak_match = re.search(r"(<speak[\s\S]+?</speak>)", script, flags=re.IGNORECASE)
+        if speak_match:
+            return speak_match.group(1).strip()
+        return None
+
+    @staticmethod
+    def _ssml_to_plain_text(ssml: str) -> str:
+        import html
+
+        text = re.sub(r"<\/?speak[^>]*>", " ", ssml, flags=re.IGNORECASE)
+        text = re.sub(r"</p>", "\n\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"\s+\n", "\n", text)
+        text = re.sub(r"\n\s+", "\n", text)
+        return html.unescape(text.strip())
+
+    @staticmethod
+    def _markdown_to_plain_text(script: str) -> str:
+        import html
+
+        text = script
+        text = re.sub(r"```[\s\S]*?```", "\n", text)
+        text = re.sub(r"`([^`]+)`", r"\1", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"[*_]{1,3}([^*_]+)[*_]{1,3}", r"\1", text)
+        text = re.sub(r"^\s{0,3}#+\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s{0,3}(?:[-*+]\s+|\d+\.\s+)", "", text, flags=re.MULTILINE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        lines = [line.strip() for line in text.splitlines()]
+
+        paragraphs: List[str] = []
+        current: List[str] = []
+        for line in lines:
+            if not line:
+                if current:
+                    paragraphs.append(" ".join(current))
+                    current = []
+                continue
+            current.append(line)
+        if current:
+            paragraphs.append(" ".join(current))
+
+        cleaned = "\n\n".join(paragraphs).strip()
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)
+        return html.unescape(cleaned)
+
+    @staticmethod
+    def _plain_text_to_ssml(plain_text: str) -> str:
+        import html
+
+        paragraphs = [para.strip() for para in re.split(r"\n\s*\n", plain_text) if para.strip()]
+        if not paragraphs:
+            raise ValueError("Plain text conversion produced no paragraphs")
+
+        sentence_splitter = re.compile(r"(?<=[.!?])\s+")
+        ssml_parts: List[str] = []
+        for para in paragraphs:
+            sentences = [html.escape(sentence.strip()) for sentence in sentence_splitter.split(para) if sentence.strip()]
+            if not sentences:
+                continue
+            ssml_parts.append("<p>" + "".join(f"<s>{sentence}</s>" for sentence in sentences) + "</p>")
+
+        if not ssml_parts:
+            raise ValueError("Plain text sanitisation removed all readable content")
+
+        return "<speak>" + "".join(ssml_parts) + "</speak>"
+
+    def _build_music_mix(
+        self, plan: Dict[str, Any], songs: List[SongMetadata], slug: str
+    ) -> tuple[Optional[Path], Optional[Path]]:
         segments = plan.get("segments", [])
-        extracted_paths: List[Path] = []
-        temp_dir = self.config.output_dir / "tmp"
-        temp_dir.mkdir(exist_ok=True)
-        for idx, segment in enumerate(segments):
+        song_sequence: List[SongMetadata] = []
+        for segment in segments:
             song_title = segment.get("song")
             if not song_title:
                 continue
@@ -220,6 +341,22 @@ class MorningCastPipeline:
             if not song:
                 logger.warning("Song %s not found in metadata", song_title)
                 continue
+            song_sequence.append(song)
+
+        if not song_sequence:
+            return None, None
+
+        final_song = song_sequence[-1]
+        final_song_path = final_song.path if final_song.path.exists() else None
+        if final_song_path is None:
+            logger.warning("Final song %s is missing on disk", final_song.title)
+
+        bed_candidates = song_sequence[:-1]
+
+        extracted_paths: List[Path] = []
+        temp_dir = self.config.output_dir / "tmp"
+        temp_dir.mkdir(exist_ok=True)
+        for idx, song in enumerate(bed_candidates):
             hook = find_hook(song.path)
             output = temp_dir / f"segment_{idx}_{slug}.wav"
             extract_segment(
@@ -227,12 +364,15 @@ class MorningCastPipeline:
                 output,
             )
             extracted_paths.append(output)
+
         if not extracted_paths:
-            raise RuntimeError("No songs available for mix")
+            logger.info("No background music beds generated; voice will run dry.")
+            return None, final_song_path
+
         mix_path = temp_dir / f"music_mix_{slug}.wav"
         crossfade_tracks(extracted_paths, mix_path)
         logger.info("Music mix rendered to %s", mix_path)
-        return mix_path
+        return mix_path, final_song_path
 
     def _find_song(self, title: str, songs: List[SongMetadata]) -> Optional[SongMetadata]:
         lowered = title.lower()
