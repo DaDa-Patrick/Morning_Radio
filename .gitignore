@@ -1,0 +1,17 @@
+# Node.js
+node_modules/
+.env
+**/.env
+.env.local
+.env.development
+.env.production
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
