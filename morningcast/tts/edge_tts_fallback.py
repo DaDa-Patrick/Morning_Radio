@@ -18,13 +18,13 @@ class EdgeTTSEngine(TextToSpeechEngine):  # pragma: no cover - async network cal
     def __init__(self, voice: str = "zh-TW-HsiaoChenNeural"):
         self.voice = voice
 
-    def synthesize_ssml(self, ssml: str, output_path: Path) -> None:
+    def synthesize(self, *, plain_text: str, ssml: str, output_path: Path) -> None:
         if edge_tts is None:
             raise RuntimeError("edge-tts is not installed") from _IMPORT_ERROR  # type: ignore[name-defined]
-        asyncio.run(self._synthesize(ssml, output_path))
+        asyncio.run(self._synthesize(plain_text, output_path))
 
-    async def _synthesize(self, ssml: str, output_path: Path) -> None:
+    async def _synthesize(self, text: str, output_path: Path) -> None:
         if edge_tts is None:
             raise RuntimeError("edge-tts is not installed") from _IMPORT_ERROR  # type: ignore[name-defined]
-        communicate = edge_tts.Communicate(ssml, voice=self.voice)
+        communicate = edge_tts.Communicate(text=text, voice=self.voice)
         await communicate.save(str(output_path))

@@ -23,7 +23,7 @@ class AzureTTSEngine(TextToSpeechEngine):  # pragma: no cover - network service
         if not self.key or not self.region:
             raise RuntimeError("Azure TTS credentials are missing")
 
-    def synthesize_ssml(self, ssml: str, output_path: Path) -> None:
+    def synthesize(self, *, plain_text: str, ssml: str, output_path: Path) -> None:
         speech_config = speechsdk.SpeechConfig(subscription=self.key, region=self.region)
         audio_cfg = speechsdk.audio.AudioOutputConfig(filename=str(output_path))
         synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_cfg)
