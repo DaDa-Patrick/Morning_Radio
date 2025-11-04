@@ -23,8 +23,9 @@ class EdgeTTSEngine(TextToSpeechEngine):  # pragma: no cover - async network cal
             raise RuntimeError("edge-tts is not installed") from _IMPORT_ERROR  # type: ignore[name-defined]
         asyncio.run(self._synthesize(ssml, output_path))
 
+    # edge_tts_fallback.py 第 23–31 行（修改後，正確）
     async def _synthesize(self, ssml: str, output_path: Path) -> None:
         if edge_tts is None:
             raise RuntimeError("edge-tts is not installed") from _IMPORT_ERROR  # type: ignore[name-defined]
-        communicate = edge_tts.Communicate(text=ssml, voice=self.voice, is_ssml=True)
+        communicate = edge_tts.Communicate(text=ssml, voice=self.voice)
         await communicate.save(str(output_path))
