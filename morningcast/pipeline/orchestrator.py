@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -166,6 +167,11 @@ class MorningCastPipeline:
         }
         config = OpenAIConfig(api_key=self.config.llm_api_key or os.environ.get("OPENAI_API_KEY", ""), model=self.config.llm_models["planner"], temperature=0.4)
         response = plan_program(payload, config)
+        response = response.strip()
+        if response.startswith("```"):
+            response = re.sub(r"^```[a-zA-Z0-9]*\n", "", response)
+            response = re.sub(r"```$", "", response)
+            response = response.strip()
         try:
             plan = json.loads(response)
         except json.JSONDecodeError as exc:
