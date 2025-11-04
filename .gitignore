@@ -6,6 +6,7 @@ node_modules/
 .env.development
 .env.production
 .venv/
+media/
 
 # Python
 __pycache__/
