@@ -5,6 +5,7 @@ node_modules/
 .env.local
 .env.development
 .env.production
+.venv/
 
 # Python
 __pycache__/
