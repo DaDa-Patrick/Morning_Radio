@@ -79,8 +79,14 @@ def export_with_metadata(source: Path, target: Path, metadata: Optional[dict] = 
     if cover and cover.exists():
         cover_stream = ffmpeg.input(str(cover))
         output_streams.append(cover_stream)
-        output = ffmpeg.output(*output_streams, str(target), **output_kwargs)
-        output = output.global_args("-map", "0:a", "-map", "1:v", "-id3v2_version", "3")
+        output = ffmpeg.output(
+            *output_streams,
+            str(target),
+            **output_kwargs,
+            vcodec="mjpeg",
+            map=["0:a", "1:v"],
+            id3v2_version="3",
+        )
         output = output.global_args(
             "-metadata:s:v:0",
             "title=Album cover",
@@ -94,6 +100,8 @@ def export_with_metadata(source: Path, target: Path, metadata: Optional[dict] = 
 
     if metadata:
         for key, value in metadata.items():
+            if value is None:
+                continue
             output = output.global_args("-metadata", f"{key}={value}")
 
     ffmpeg.run(output, overwrite_output=True, quiet=True)

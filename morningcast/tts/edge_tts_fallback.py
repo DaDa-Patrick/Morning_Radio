@@ -26,5 +26,5 @@ class EdgeTTSEngine(TextToSpeechEngine):  # pragma: no cover - async network cal
     async def _synthesize(self, ssml: str, output_path: Path) -> None:
         if edge_tts is None:
             raise RuntimeError("edge-tts is not installed") from _IMPORT_ERROR  # type: ignore[name-defined]
-        communicate = edge_tts.Communicate(ssml=ssml, voice=self.voice)
+        communicate = edge_tts.Communicate(text=ssml, voice=self.voice, is_ssml=True)
         await communicate.save(str(output_path))
