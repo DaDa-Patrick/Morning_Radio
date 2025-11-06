@@ -60,9 +60,12 @@ def duck_voice_over(
 
     music_audio = music.audio.filter_("volume", volume=f"{music_gain_db}dB")
     voice_audio = voice.audio.filter_("volume", volume=f"{voice_gain_db}dB")
+    split_voice = voice_audio.filter_multi_output("asplit", 2)
+    voice_for_duck = split_voice.stream(0)
+    voice_for_mix = split_voice.stream(1)
 
     ducked_music = ffmpeg.filter(
-        [music_audio, voice_audio],
+        [music_audio, voice_for_duck],
         "sidechaincompress",
         threshold="-28dB",
         ratio=12,
@@ -71,7 +74,7 @@ def duck_voice_over(
         makeup=6,
     )
 
-    mixed = ffmpeg.filter([ducked_music, voice_audio], "amix", inputs=2, dropout_transition=0)
+    mixed = ffmpeg.filter([ducked_music, voice_for_mix], "amix", inputs=2, dropout_transition=0)
     mixed = mixed.filter_(
         "alimiter",
         limit="-1dB",
